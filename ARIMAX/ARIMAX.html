@@ -1,0 +1,225 @@
+import itertools
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
+import warnings
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.arima_model import ARIMA
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from statsmodels.tsa.stattools import adfuller
+import math
+import seaborn as sns
+import statsmodels.api as sm
+from statsmodels.tsa.seasonal import seasonal_decompose
+import matplotlib.dates as mdates
+
+warnings.filterwarnings('ignore')
+plt.rcParams['font.sans-serif']=['SimHei']
+
+
+
+df = pd.read_csv("Tokyo Area Load Dataset2.csv",
+                 usecols=['timestamp', 'load','temperature TK','rainfall TK','humidity TK','wind speed TK',
+                          'temperature YH', 'rainfall YH', 'humidity YH', 'wind speed YH',
+                          'temperature QB','rainfall QB','humidity QB','wind speed QB'],  # 假设时间列名为'timestamp'
+                 parse_dates=['timestamp'],       # 解析时间列
+                 index_col='timestamp')           # 设为索引
+
+
+# 2. 数据预处理 - 确保没有缺失值或异常值
+print("缺失值统计:")
+print(df.isnull().sum())
+
+# 处理缺失值 - 向前填充
+df.fillna(method='ffill', inplace=True)
+df.fillna(method='bfill', inplace=True)  # 如果开头有缺失
+
+# 验证时间范围是否正确
+print("数据时间范围:", df.index.min(), "至", df.index.max())
+
+scaler = StandardScaler()
+features = ['temperature TK','rainfall TK','humidity TK','wind speed TK',
+             'temperature YH', 'rainfall YH', 'humidity YH', 'wind speed YH',
+            'temperature QB','rainfall QB','humidity QB','wind speed QB']
+df[features] = scaler.fit_transform(df[features])
+
+
+split_point = df.index[int(len(df)*0.7)]
+train_data = df.loc[df.index < split_point]
+test_data = df.loc[df.index >= split_point]
+
+X_train = train_data[features].values  # 转换为数组
+y_train = train_data['load'].values
+X_test = test_data[features].values
+y_test = test_data['load'].values
+
+# 检查测试集时间范围
+print("测试集时间范围:", test_data.index[0], "至", test_data.index[-1])
+
+plt.figure(dpi=300, figsize=(24,8))
+plt.title('proportion', size=40)
+plt.xlabel('sample',size=15)
+plt.ylabel('load',size=15)
+plt.plot(train_data, 'r-', label='Training Data')
+plt.plot(test_data, 'y-', label='Testing Data')
+font = {'serif': 'Times New Roman','size': 10}
+plt.rc('font', **font)
+plt.legend(fontsize=10)
+plt.show()
+
+
+d = 1
+p_min = 0
+q_min = 0
+p_max = 2
+q_max = 2
+
+
+results_aic = pd.DataFrame(index=['AR{}'.format(i) for i in range(p_min, p_max + 1)],
+                           columns=['MA{}'.format(i) for i in range(q_min, q_max + 1)])
+for p, q in itertools.product(range(p_min, p_max + 1),
+                              range(q_min, q_max + 1)):
+    if p == 0 and q == 0:
+        results_aic.loc['AR{}'.format(p), 'MA{}'.format(q)] = np.nan
+        continue
+    try:
+        model = sm.tsa.ARIMA(
+            endog=y_train,
+            exog=X_train,
+            order=(p, d, q)
+        )
+        results = model.fit()
+        results_aic.loc['AR{}'.format(p), 'MA{}'.format(q)] = results.aic
+    except:
+        continue
+
+results_aic
+
+pd.set_option('display.max_columns', None)
+
+pd.set_option('display.max_rows',None)
+print(results_aic)
+results_aic = results_aic[results_aic.columns].astype(float)
+
+
+# 6. 滚动预测
+history_y = list(y_train)
+history_X = list(X_train)  # 保持历史外生变量
+predictions = []
+
+
+final_model = sm.tsa.ARIMA(endog=y_train,exog=X_train,order=(29, 1, 24)).fit()
+for t in range(len(y_test)):
+    try:
+        # 预测时提供外生变量 - 确保形状正确
+        exog_input = X_test[t].reshape(1, -1)  # 形状应为(1, n_features)
+
+        # 使用最终模型进行预测
+        yhat = final_model.forecast(steps=1, exog=exog_input)[0]
+        predictions.append(yhat)
+
+        # 更新历史数据
+        history_y.append(y_test[t])
+        history_X.append(X_test[t])
+
+        # 更新模型 - 添加新观测
+        final_model = final_model.append(
+            endog=[y_test[t]],
+            exog=[X_test[t]],
+            refit=False
+        )
+
+    except Exception as e:
+        print(f"时间点{t}预测失败: {str(e)}")
+        # 使用最后已知值作为回退
+        predictions.append(predictions[-1] if predictions else y_train[-1])
+
+
+
+# 7. 模型评估
+rmse = np.sqrt(mean_squared_error(y_test, predictions))
+mae = mean_absolute_error(y_test, predictions)
+r2 = r2_score(y_test, predictions)
+print(f'模型评估: RMSE={rmse:.2f}, MAE={mae:.2f}, R²={r2:.4f}')
+
+
+
+
+# 表示期間を最後の3日間に設定（例）
+start_date = test_data.index[-1] - pd.DateOffset(days=3)
+end_date = test_data.index[-1]
+
+plt.figure(figsize=(20, 8), dpi=300)
+plt.plot(test_data.index, predictions, 'b--', linewidth=0.5, label='Predicted Load')
+plt.plot(test_data.index, y_test, 'r-', linewidth=0.8, label='Actual Load')
+
+# 横軸範囲を3日間に制限
+plt.xlim(start_date, end_date)
+
+# 日付フォーマットの設定
+ax = plt.gca()
+ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))  # 3時間間隔
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))  # 年-月-日 時:分
+
+plt.gcf().autofmt_xdate()
+plt.title('ARIMAX Model Prediction (2021/12/29-2021/12/31)', fontsize=15)  # タイトル更新
+plt.xlabel('Time')
+plt.ylabel('Value')
+plt.legend()
+plt.show()
+
+
+def arimax_forecast(model, history_y, history_X, future_X, steps):
+    forecasts = []
+    current_model = model
+
+    for i in range(steps):
+        try:
+            # 确保外生变量形状正确
+            exog_input = future_X[i].reshape(1, -1)
+
+            # 预测下一步
+            yhat = current_model.forecast(steps=1, exog=exog_input)[0]
+            forecasts.append(yhat)
+
+            # 更新历史数据
+            history_y.append(yhat)
+            history_X.append(future_X[i])
+
+            # 更新模型
+            current_model = current_model.append(
+                endog=[yhat],
+                exog=[future_X[i]],
+                refit=False
+            )
+        except:
+            # 简单回退：使用最后一个预测值
+            forecasts.append(forecasts[-1] if forecasts else history_y[-1])
+
+    return forecasts
+
+
+steps = 4  # 预测未来4个时间点
+n_features = X_train.shape[1]  # 特征数量
+
+# 创建future_X（示例数据，实际应替换为真实未来特征）
+future_X = np.zeros((steps, n_features))
+
+# 调用预测函数
+future_values = arimax_forecast(
+    model=final_model,
+    history_y=history_y,
+    history_X=history_X,
+    future_X=future_X,
+    steps=steps
+)
+
+# 输出结果
+print(f"未来{steps}个预测值：\n{future_values}")
+
+
+
+
