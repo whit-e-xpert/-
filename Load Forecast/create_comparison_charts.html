@@ -1,0 +1,51 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates # 确保导入了mdates模块
+
+# --- 1. 加载所有需要的数据 ---
+preds_arimax = pd.read_csv('predictions_arimax.csv')
+preds_lstm_svr = pd.read_csv('predictions_lstm_svr.csv')
+actual_values = pd.read_csv('y_test_actual.csv')
+timestamps = pd.read_csv('test_timestamps.csv', parse_dates=['timestamp'])
+
+# --- 2. 合并成一个用于分析的DataFrame ---
+results_df = pd.DataFrame({
+    'timestamp': timestamps['timestamp'],
+    'actual': actual_values['actual_load'],
+    'predicted_arimax': preds_arimax['predicted_load'],
+    'predicted_lstm_svr': preds_lstm_svr['predicted_load']
+})
+results_df['abs_error_arimax'] = np.abs(results_df['actual'] - results_df['predicted_arimax'])
+results_df['abs_error_lstm_svr'] = np.abs(results_df['actual'] - results_df['predicted_lstm_svr'])
+
+print("数据加载和合并完成，已生成结果分析DataFrame:")
+print(results_df.head())
+
+
+# --- 3. 绘制【绝对误差时序对比图】 ---
+plt.figure(figsize=(20, 8), dpi=300)
+plt.plot(results_df['timestamp'], results_df['abs_error_lstm_svr'], label='LSTM-SVR Absolute Error', color='blue', linewidth=0.8)
+plt.plot(results_df['timestamp'], results_df['abs_error_arimax'], label='ARIMAX Absolute Error', color='orange', linewidth=0.8, linestyle='--')
+plt.title('Comparison of Absolute Errors Over Time')
+plt.xlabel('Time')
+plt.ylabel('Absolute Error')
+plt.legend()
+plt.grid(True, alpha=0.5)
+
+# =====================================================================
+# --- 【核心修正点】: 使用按月刻度来适配长时间序列 ---
+# =====================================================================
+ax = plt.gca()
+
+# 每隔1个月显示一个主刻度
+ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+# 刻度标签格式
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+
+# 自动旋转日期标签，防止重叠
+plt.gcf().autofmt_xdate()
+# =====================================================================
+
+plt.show()
+
