@@ -1,9 +1,7 @@
 # -- 必需的库 --
 import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
 import time
+import json
 import pandas as pd
 import numpy as np
 from math import sqrt
@@ -18,16 +16,24 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.svm import SVR
 from sklearn.model_selection import train_test_split, GridSearchCV
 
-# -- TensorFlow/Keras 库 --
-from tensorflow.keras.layers import *
-from tensorflow.keras.models import *
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.optimizers import Adam
+# -- PyTorch 库 --
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
 
 # -- 优化库 --
 import optuna
-import json
+
 warnings.filterwarnings("ignore")
+
+# =============================================================================
+# PyTorch 设备设置
+# =============================================================================
+# 自动检测并选择可用的设备 (GPU或CPU)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"--- 设备准备就绪 ---")
+print(f"当前使用的设备: {device.upper()}")
+print("-" * 25)
 
 start_time = time.time()
 
@@ -178,94 +184,145 @@ vp_test = vp_test.reshape((vp_test.shape[0], n_in, or_dim))
 
 print("数据预处理完成。")
 # =============================================================================
-# 阶段 1: 使用贝叶斯优化 (Optuna) 寻找最佳 LSTM 参数
+# 阶段 3: 使用 Optuna 和 PyTorch 优化 LSTM 模型 (已加入参数文件逻辑)
 # =============================================================================
-print("\n--- 开始阶段 1: 优化LSTM ---")
-# 定义保存最佳参数的文件名
-lstm_params_file = 'best_lstm_params.json'
+print("\n--- 开始阶段 3: 使用 Optuna 优化 PyTorch LSTM ---")
 
-# 检查最佳参数文件是否已存在
+
+# 1. 定义PyTorch LSTM模型结构
+class LSTMModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim1, hidden_dim2, dense_dim, output_dim):
+        super(LSTMModel, self).__init__()
+        self.lstm1 = nn.LSTM(input_dim, hidden_dim1, batch_first=True)
+        self.lstm2 = nn.LSTM(hidden_dim1, hidden_dim2, batch_first=True)
+        self.fc1 = nn.Linear(hidden_dim2, dense_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(dense_dim, 32)
+        self.fc3 = nn.Linear(32, output_dim)
+
+    def forward(self, x):
+        out, _ = self.lstm1(x);
+        out, _ = self.lstm2(out)
+        out = out[:, -1, :];
+        out = self.fc1(out)
+        out = self.relu(out);
+        out = self.fc2(out)
+        out = self.relu(out);
+        out = self.fc3(out)
+        return out
+
+
+# 2. 为 Optuna 定义目标函数
+def objective(trial, X_train, y_train):
+    hidden_dim1 = trial.suggest_int('hidden_dim1', 100, 300)
+    hidden_dim2 = trial.suggest_int('hidden_dim2', 50, 200)
+    dense_dim = trial.suggest_int('dense_dim', 32, 128)
+    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256])
+
+    # Use the passed-in data
+    vp_train_sub, vp_val, vt_train_sub, vt_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=42
+    )
+
+    X_train_sub_t = torch.from_numpy(vp_train_sub).float().to(device)
+    y_train_sub_t = torch.from_numpy(vt_train_sub).float().to(device)
+    X_val_t = torch.from_numpy(vp_val).float().to(device)
+    y_val_t = torch.from_numpy(vt_val).float().to(device)
+
+    model = LSTMModel(or_dim, hidden_dim1, hidden_dim2, dense_dim, n_out).to(device)
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    train_dataset = TensorDataset(X_train_sub_t, y_train_sub_t)
+    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+
+    model.train()
+    for epoch in range(100):
+        for inputs, labels in train_loader:
+            outputs = model(inputs);
+            loss = criterion(outputs, labels)
+            optimizer.zero_grad();
+            loss.backward();
+            optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        val_outputs = model(X_val_t)
+        val_loss = criterion(val_outputs, y_val_t)
+
+    return val_loss.item()
+
+
+# 3. 检查、加载或运行优化
+lstm_params_file = 'best_lstm_params_pytorch.json'
 if os.path.exists(lstm_params_file):
-    # 如果文件存在，直接加载参数，跳过优化
     print(f"检测到已存在的参数文件'{lstm_params_file}'，直接加载参数。")
     with open(lstm_params_file, 'r') as f:
         best_lstm_params = json.load(f)
     print(f"加载的LSTM参数: {best_lstm_params}")
-
 else:
-    # --- 只有当文件不存在时，才执行以下所有优化步骤 ---
-
     print(f"未找到参数文件'{lstm_params_file}'，开始执行贝叶斯优化...")
-
-    # 1. 分割数据（只在优化时需要）
-    vp_train_sub, vp_val, vt_train_sub, vt_val = train_test_split(vp_train, vt_train, test_size=0.2, random_state=42)
-
-
-    # 2. 定义objective函数（只在优化时需要）
-    def objective(trial):
-        # ...（您的objective函数内部代码保持不变）...
-        lstm_units_1 = trial.suggest_int('lstm_units_1', 100, 300)
-        lstm_units_2 = trial.suggest_int('lstm_units_2', 50, 200)
-        dense_units_1 = trial.suggest_int('dense_units_1', 32, 128)
-        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-        batch_size = trial.suggest_categorical('batch_size', [64, 128, 256])
-
-        # 根据建议的参数构建模型
-        model = Sequential()
-        model.add(LSTM(lstm_units_1, activation='selu', return_sequences=True,
-                       input_shape=(vp_train.shape[1], vp_train.shape[2])))
-        model.add(LSTM(lstm_units_2, activation='selu'))
-        model.add(Dense(dense_units_1, activation='relu'))
-        model.add(Dense(32, activation='relu'))
-        model.add(Dense(vt_train.shape[1], activation='linear'))
-
-        # 编译模型
-        optimizer = Adam(learning_rate=learning_rate)
-        model.compile(optimizer=optimizer, loss='mse')
-
-        # 定义早停回调，防止过拟合
-        early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-
-        # 训练模型（使用子训练集和验证集）
-        model.fit(vp_train_sub, vt_train_sub, epochs=100, batch_size=batch_size, validation_data=(vp_val, vt_val),
-                  callbacks=[early_stopping], verbose=0)
-
-        # 在验证集上评估并返回损失值
-        loss = model.evaluate(vp_val, vt_val, verbose=0)
-        return loss
-
-
-    # 3. 创建并运行Optuna研究
     study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=50)  # n_trials建议为30或50
+    # ## FIX 2: Use a lambda function to pass data to objective ##
+    study.optimize(lambda trial: objective(trial, vp_train, vt_train), n_trials=50)
 
-    # 4. 获取最佳参数
     best_lstm_params = study.best_params
     print(f"LSTM 优化完成。找到的最佳参数: {best_lstm_params}")
-
-    # 5. 将新找到的最佳参数保存到文件中
     with open(lstm_params_file, 'w') as f:
         json.dump(best_lstm_params, f, indent=4)
     print(f"最佳参数已保存到 '{lstm_params_file}'。")
 
-# --- 使用最佳参数（无论是加载的还是新找到的）来训练最终的LSTM模型 ---
-# 这部分代码应该在 if/else 结构之外
+# 4. 使用最佳参数训练最终模型
 print("\n正在使用最佳参数训练最终的LSTM模型...")
-final_lstm_model = Sequential()
-final_lstm_model.add(LSTM(best_lstm_params['lstm_units_1'], activation='selu', return_sequences=True,
-                          input_shape=(vp_train.shape[1], vp_train.shape[2])))
-final_lstm_model.add(LSTM(best_lstm_params['lstm_units_2'], activation='selu'))
-final_lstm_model.add(Dense(best_lstm_params['dense_units_1'], activation='relu'))
-final_lstm_model.add(Dense(32, activation='relu'))
-final_lstm_model.add(Dense(vt_train.shape[1], activation='linear'))
+X_train_tensor = torch.from_numpy(vp_train).float().to(device)
+y_train_tensor = torch.from_numpy(vt_train).float().to(device)
 
-final_optimizer = Adam(learning_rate=best_lstm_params['learning_rate'])
-final_lstm_model.compile(optimizer=final_optimizer, loss='mse')
-final_lstm_model.fit(vp_train, vt_train, epochs=100, batch_size=best_lstm_params['batch_size'], verbose=2)
+# Pop the hyperparameters for the optimizer and dataloader from the dictionary
+learning_rate = best_lstm_params.pop('learning_rate')
+batch_size = best_lstm_params.pop('batch_size')
 
-# 使用优化后的LSTM模型为SVR生成特征
-lstm_train_features = final_lstm_model.predict(vp_train)
-lstm_test_features = final_lstm_model.predict(vp_test)
+# Use the remaining dictionary to initialize the model
+final_model = LSTMModel(
+    input_dim=or_dim,
+    **best_lstm_params,  # Unpacks hidden_dim1, hidden_dim2, dense_dim
+    output_dim=n_out
+).to(device)
+
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(final_model.parameters(), lr=learning_rate)
+train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+
+final_model.train()
+for epoch in range(100):
+    # --- 新增代码：记录每轮开始的时间 ---
+    epoch_start_time = time.time()
+
+    # 内部循环（批量训练）保持不变
+    for inputs, labels in train_loader:
+        outputs = final_model(inputs)
+        loss = criterion(outputs, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # --- 新增代码：记录每轮结束的时间并计算耗时 ---
+    epoch_end_time = time.time()
+    epoch_duration = epoch_end_time - epoch_start_time
+
+    # --- 修改打印语句，加入耗时信息 ---
+    # 使用 :.2f 表示小数点后保留2位浮点数
+    print(f'Final Model Training - Epoch [{epoch + 1}/100], Loss: {loss.item():.2e}, Time: {epoch_duration:.2f}s')
+
+print("最终 LSTM 模型训练完成。")
+
+# 5. 使用最终模型为SVR生成特征
+final_model.eval()
+X_test_tensor = torch.from_numpy(vp_test).float().to(device)
+with torch.no_grad():
+    lstm_train_features = final_model(X_train_tensor).cpu().numpy()
+    lstm_test_features = final_model(X_test_tensor).cpu().numpy()
 
 # =============================================================================
 # 阶段 2: 使用网格搜索 (GridSearchCV) 寻找最佳 SVR 参数
@@ -273,7 +330,7 @@ lstm_test_features = final_lstm_model.predict(vp_test)
 print("\n---开始阶段2:优化SVR---")
 
 # 定义保存SVR最佳参数的文件名
-svr_params_file = 'best_svr_params.json'
+svr_params_file = 'best_svr_params_pytorch.json'
 
 # 检查SVR最佳参数文件是否已存在
 if os.path.exists(svr_params_file):
@@ -499,7 +556,7 @@ print("テストセットの指標:")
 print(test_table)
 
 # =====================================================================
-# --- 文件保存 ---
+# --- 【最终修正版】结果可视化与文件保存 ---
 # =====================================================================
 
 # --- 提取与测试集样本完全对应的时间戳 ---
