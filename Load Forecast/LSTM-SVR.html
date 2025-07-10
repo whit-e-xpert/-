@@ -499,161 +499,17 @@ print("テストセットの指標:")
 print(test_table)
 
 # =====================================================================
-# --- 【最终修正版】结果可视化与文件保存 ---
+# --- 文件保存 ---
 # =====================================================================
 
-# --- 1. 提取与测试集样本完全对应的时间戳 ---
+# --- 提取与测试集样本完全对应的时间戳 ---
 # 这里的逻辑是关键，它确保了时间戳与 Ytest 数组中的每一个点一一对应
 test_sample_indices = [n_train_number + j * scroll_window + n_in for j in range(len(Ytest))]
 # 从最开始加载的、完整的 time_col 中，根据索引提取出正确的时间戳
 test_time = time_col.iloc[test_sample_indices]
 
-# --- 2. 截取最后三日的数据用于绘图 ---
-days = 3
-hours_per_day = 24
-last_three_days_samples = days * hours_per_day
-
-# 从测试集的末尾截取数据
-predicted_data_last3 = predicted_data[-last_three_days_samples:]
-Ytest_last3 = Ytest[-last_three_days_samples:]
-# 【核心修正】: 同样从与测试集对应的时间戳数组的末尾截取
-test_time_last3 = test_time[-last_three_days_samples:]
-
-
-# 绘制预测结果对比图
-plt.figure(figsize=(20, 8), dpi=300)
-plt.plot(test_time_last3, predicted_data_last3, 'b--', linewidth=0.5, label='Predicted Load')
-plt.plot(test_time_last3, Ytest_last3, 'r-', linewidth=0.8, label='Actual Load')
-
-# 设置图表格式
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
-plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=3))
-plt.gcf().autofmt_xdate()
-
-# 【核心修正】: 创建一个动态的、能反映真实日期的标题
-start_date_str = test_time_last3.iloc[0].strftime('%Y/%m/%d')
-end_date_str = test_time_last3.iloc[-1].strftime('%Y/%m/%d')
-plt.title(f'LSTM-SVR Model Prediction ({start_date_str} - {end_date_str})', fontsize=15)
-
-plt.legend(loc='upper right')
-plt.xlabel("Time")
-plt.ylabel("Value")
-plt.tight_layout()
-plt.show()
-
-
-# ======================== 误差分析代码块 ========================
-
-# 1. 创建一个用于分析的结果DataFrame
-# 确保 Ytest 和 predicted_data 是一维数组
-final_true_values = Ytest.flatten()
-final_predictions = predicted_data.flatten()
-
-results_df = pd.DataFrame({
-    'timestamp': test_time,
-    'actual': final_true_values,
-    'predicted': final_predictions
-})
-
-# 2. 计算误差
-results_df['error'] = results_df['actual'] - results_df['predicted']
-results_df['absolute_error'] = np.abs(results_df['error'])
-
-# 3. 从时间戳中提取用于分组分析的特征
-results_df['hour'] = results_df['timestamp'].dt.hour
-results_df['day_of_week'] = results_df['timestamp'].dt.day_name() # 获取星期的名称，更直观
-results_df['month'] = results_df['timestamp'].dt.month
-
-print("\n--- 开始进行误差分析 ---")
-print(results_df.head())
-
-
-# 2.1绘制整个测试集期间的绝对误差时序图
-plt.figure(figsize=(20, 8), dpi=300)
-plt.plot(results_df['timestamp'], results_df['absolute_error'], label='Absolute Error', color='red', linewidth=0.8)
-plt.title("Absolute Error Over Entire Test Period (LSTM-SVR)")
-plt.xlabel('Time')
-plt.ylabel('Absolute Error')
-plt.legend()
-plt.grid(linestyle='--', alpha=0.6)
-plt.show()
-
-
-# 3.1绘制最后3天的误差图
-# 截取最后3天的误差数据（与时间戳同步）
-diff_errors_test = np.abs(Ytest - predicted_data)  # 计算全体测试集误差
-last_3days_errors = diff_errors_test[-last_three_days_samples:]
-#绘制误差图
-plt.figure(figsize=(20, 8), dpi=300)
-plt.plot(test_time_last3, last_3days_errors, color='red', linewidth=1, label='Test Error')
-# 设置时间轴格式
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))  # 时间格式
-plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=3))
-plt.gcf().autofmt_xdate()  # 自动旋转日期标签
-# 显示范围限定
-plt.xlim(   test_time_last3.min(), test_time_last3.max())
-# 标题与标签
-plt.title("LSTM-SVR Prediction Errors (2021/12/29-2021/12/31)", fontsize=15)
-plt.xlabel("Time")
-plt.ylabel("Absolute Error")
-plt.legend()
-plt.grid(linestyle='--', alpha=0.5)
-plt.show()
-
-
-# 4.1绘制预测值 vs 实际值散点图
-plt.figure(figsize=(10, 10), dpi=300)
-plt.scatter(results_df['actual'], results_df['predicted'], alpha=0.5, label='Predictions')
-# 绘制 y=x 的完美预测线作为参考
-perfect_line = np.linspace(results_df['actual'].min(), results_df['actual'].max(), 100)
-plt.plot(perfect_line, perfect_line, color='red', linestyle='--', label='Perfect Prediction (y=x)')
-plt.title('Predicted vs. Actual Values')
-plt.xlabel('Actual Values')
-plt.ylabel('Predicted Values')
-plt.legend()
-plt.grid(True)
-plt.show()
-#解读：如果散点普遍在红线下方，说明模型倾向于低估；如果在红线上方，则倾向于高估。
-
-
-# 5.1按小时分析平均绝对误差
-hourly_error = results_df.groupby('hour')['absolute_error'].mean().reset_index()
-plt.figure(figsize=(12, 6), dpi=300)
-plt.bar(hourly_error['hour'], hourly_error['absolute_error'], color='skyblue')
-plt.title('Average Absolute Error by Hour of Day')
-plt.xlabel('Hour of Day')
-plt.ylabel('Average Absolute Error')
-plt.xticks(np.arange(0, 24, 1))
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-plt.show()
-
-
-#  6.1按星期几分析平均绝对误差
-# 设定正确的星期顺序
-weekday_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-daily_error = results_df.groupby('day_of_week')['absolute_error'].mean().reindex(weekday_order).reset_index()
-
-plt.figure(figsize=(12, 6), dpi=300)
-plt.bar(daily_error['day_of_week'], daily_error['absolute_error'], color='lightgreen')
-plt.title('Average Absolute Error by Day of Week')
-plt.xlabel('Day of Week')
-plt.ylabel('Average Absolute Error')
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-plt.show()
-
-# 7.1 按月份分析平均绝对误差
-monthly_error = results_df.groupby('month')['absolute_error'].mean().reset_index()
-plt.figure(figsize=(12, 6), dpi=300)
-plt.bar(monthly_error['month'], monthly_error['absolute_error'], color='mediumpurple')
-plt.title('Average Absolute Error by Month')
-plt.xlabel('Month')
-plt.ylabel('Average Absolute Error')
-plt.xticks(np.arange(1, 13, 1)) # 确保X轴显示所有12个月份
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-plt.show()
-
 # =====================================================================
-# --- 【新增代码】保存预测结果、真实值和时间戳 ---
+# --- 保存预测结果、真实值和时间戳 ---
 # =====================================================================
 print("\n正在保存结果到文件...")
 
