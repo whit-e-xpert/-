@@ -114,8 +114,15 @@ n_in = 9    # 输入前5行的数据
 n_out = 1  # 预测未来1步的数据 注意！SVR不可以多步预测！这是SVR定义决定的！！，这里只能为1
 or_dim = values.shape[1]        # 记录特征数据维度
 print(f"特征数据维度：{or_dim}")
-num_samples = 35055  # 可以设定从数据中取出多少个点用于本次网络的训练与测试。
 scroll_window = 1  #如果等于1，下一个数据从第二行开始取。如果等于2，下一个数据从第三行开始取
+
+# =====================================================================
+# --- 【核心修正点】: 自动计算可生成的样本总数，避免硬编码和越界 ---
+# =====================================================================
+num_samples = len(values) - n_in - n_out + 1
+print(f"数据集总行数: {len(values)}")
+print(f"根据窗口大小，最多可生成 {num_samples} 个有效样本。")
+# =====================================================================
 
 
 res = data_collation(values, n_in, n_out, or_dim, scroll_window, num_samples)
@@ -124,15 +131,35 @@ values = np.array(res)
 # 将前面处理好的DataFrame（data）转换成numpy数组，方便后续的数据操作。
 
 n_train_number = int(num_samples * 0.7)
-
-
 Xtrain = values[:n_train_number, :n_in*or_dim]
 Ytrain = values[:n_train_number, n_in*or_dim:]
-
-
 Xtest = values[n_train_number:, :n_in*or_dim]
 Ytest = values[n_train_number:,  n_in*or_dim:]
 
+# =====================================================================
+# --- 【新增代码】: 在脚本开头打印训练集和测试集的时间范围 ---
+# =====================================================================
+# 计算与每个样本的目标值相对应的时间戳索引
+# 训练集第一个样本的目标值对应的时间戳索引
+train_start_index = n_in + scroll_window * 0
+# 训练集最后一个样本的目标值对应的时间戳索引
+train_end_index = n_in + scroll_window * (n_train_number - 1)
+# 测试集第一个样本的目标值对应的时间戳索引
+test_start_index = n_in + scroll_window * n_train_number
+# 测试集最后一个样本的目标值对应的时间戳索引
+test_end_index = n_in + scroll_window * (num_samples - 1)
+
+# 从原始时间列中提取对应的时间戳
+train_start_time = time_col.iloc[train_start_index]
+train_end_time = time_col.iloc[train_end_index]
+test_start_time = time_col.iloc[test_start_index]
+test_end_time = time_col.iloc[test_end_index]
+
+print("\n--- 数据集时间范围 ---")
+print(f"【训练集】时间范围: 从 {train_start_time} 到 {train_end_time}")
+print(f"【测试集】时间范围: 从 {test_start_time} 到 {test_end_time}")
+print("-" * 25)
+# =====================================================================
 
 
 # 对训练集和测试集进行归一化
@@ -471,16 +498,25 @@ print(train_table)
 print("テストセットの指標:")
 print(test_table)
 
-# 截取最后三天的数据
+# =====================================================================
+# --- 【最终修正版】结果可视化与文件保存 ---
+# =====================================================================
+
+# --- 1. 提取与测试集样本完全对应的时间戳 ---
+# 这里的逻辑是关键，它确保了时间戳与 Ytest 数组中的每一个点一一对应
+test_sample_indices = [n_train_number + j * scroll_window + n_in for j in range(len(Ytest))]
+# 从最开始加载的、完整的 time_col 中，根据索引提取出正确的时间戳
+test_time = time_col.iloc[test_sample_indices]
+
+# --- 2. 截取最后三日的数据用于绘图 ---
 days = 3
 hours_per_day = 24
 last_three_days_samples = days * hours_per_day
 
-test_sample_indices = [n_train_number + j * scroll_window + n_in for j in range(len(Ytest))]
-test_time = time_col.iloc[test_sample_indices]
-
+# 从测试集的末尾截取数据
 predicted_data_last3 = predicted_data[-last_three_days_samples:]
 Ytest_last3 = Ytest[-last_three_days_samples:]
+# 【核心修正】: 同样从与测试集对应的时间戳数组的末尾截取
 test_time_last3 = test_time[-last_three_days_samples:]
 
 
@@ -493,7 +529,12 @@ plt.plot(test_time_last3, Ytest_last3, 'r-', linewidth=0.8, label='Actual Load')
 plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=3))
 plt.gcf().autofmt_xdate()
-plt.title('LSTM-SVR Model Prediction (2021/12/29-2021/12/31)', fontsize=15)
+
+# 【核心修正】: 创建一个动态的、能反映真实日期的标题
+start_date_str = test_time_last3.iloc[0].strftime('%Y/%m/%d')
+end_date_str = test_time_last3.iloc[-1].strftime('%Y/%m/%d')
+plt.title(f'LSTM-SVR Model Prediction ({start_date_str} - {end_date_str})', fontsize=15)
+
 plt.legend(loc='upper right')
 plt.xlabel("Time")
 plt.ylabel("Value")
@@ -610,6 +651,26 @@ plt.ylabel('Average Absolute Error')
 plt.xticks(np.arange(1, 13, 1)) # 确保X轴显示所有12个月份
 plt.grid(axis='y', linestyle='--', alpha=0.7)
 plt.show()
+
+# =====================================================================
+# --- 【新增代码】保存预测结果、真实值和时间戳 ---
+# =====================================================================
+print("\n正在保存结果到文件...")
+
+# 1. 保存LSTM-SVR的预测结果
+pd.DataFrame(predicted_data, columns=['predicted_load']).to_csv('predictions_lstm_svr.csv', index=False)
+print("  - LSTM-SVR 预测结果已保存到 'predictions_lstm_svr.csv'")
+
+# 2. 保存测试集的真实值
+# 注意：Ytest 和 test_time 已经在您的原始代码中被定义，我们直接使用即可
+pd.DataFrame(Ytest, columns=['actual_load']).to_csv('y_test_actual.csv', index=False)
+print("  - 测试集真实值已保存到 'y_test_actual.csv'")
+
+# 3. 保存测试集的时间戳
+pd.DataFrame(test_time).to_csv('test_timestamps.csv', index=False)
+print("  - 测试集时间戳已保存到 'test_timestamps.csv'")
+
+print("\n所有文件保存完毕！")
 
 end_time = time.time()#记录结束时间
 print(f"Code running time: {end_time-start_time}S")
